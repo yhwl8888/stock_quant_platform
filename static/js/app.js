@@ -99,6 +99,12 @@ function setupEventListeners() {
 
     document.getElementById('backtestBtn').addEventListener('click', runBacktest);
     document.getElementById('optimizeBtn').addEventListener('click', runOptimize);
+    document.getElementById('walkforwardBtn').addEventListener('click', runWalkforward);
+    document.getElementById('scanBtn').addEventListener('click', runScan);
+    document.getElementById('scanPool').addEventListener('change', e => {
+        document.getElementById('scanCustomBox').style.display = e.target.value === '__custom__' ? 'block' : 'none';
+    });
+    populateScanStrategies();
 }
 
 function handleResize() {
@@ -137,9 +143,12 @@ async function doSearch() {
                 results.appendChild(div);
             });
             results.classList.add('show');
-        } else {
+        } else if (/^\d{4,6}$/.test(q)) {
             results.classList.remove('show');
-            loadStock(q);
+            loadStock(q.padStart(6, '0'));
+        } else {
+            results.innerHTML = '<div class="search-result-item" style="color:var(--text-muted);cursor:default">未找到匹配股票，请输入完整代码或名称</div>';
+            results.classList.add('show');
         }
     } catch (e) {
         results.classList.remove('show');
@@ -461,7 +470,6 @@ function renderChart() {
                 start: Math.max(0, 100 - 30),
                 end: 100,
                 bottom: '2%',
-                bottom: '2%',
                 borderColor: 'rgba(255,255,255,0.1)',
                 backgroundColor: 'rgba(17,24,39,0.8)',
                 dataBackground: {
@@ -533,7 +541,14 @@ async function runBacktest() {
             return;
         }
 
-        let html = `<div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px">策略: ${strategy}</div><div class="metrics-grid">`;
+        let html = `<div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px">策略: ${strategy}</div>`;
+        if ((data.total_trades || 0) === 0) {
+            html += `<div class="error-box" style="background:rgba(245,158,11,0.1);border-color:rgba(245,158,11,0.3);color:#f59e0b;margin-bottom:8px">
+                ⚠️ 回测窗口内策略未触发任何交易。所有指标均为初始值。<br>
+                <span style="font-size:0.8rem;color:var(--text-muted)">建议：增加回测天数、放宽策略阈值（如 RSI 超卖线提高），或点击"参数优化"自动搜索可用参数组合。</span>
+            </div>`;
+        }
+        html += '<div class="metrics-grid">';
         const metrics = [
             { label: '初始资金', value: `¥${data.initial_capital?.toLocaleString()}` },
             { label: '期末资金', value: `¥${data.final_capital?.toLocaleString()}` },
@@ -625,8 +640,17 @@ async function runOptimize() {
 
         let html = `<div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px">策略: ${strategy} | 共扫描 ${data.tested}/${data.total_combinations} 种参数组合</div>`;
 
+        const allZero = data.top && data.top.length > 0 && data.top.every(t => (t.metrics?.total_trades || 0) === 0);
+        const noResults = !data.top || data.top.length === 0;
+        if (allZero || noResults) {
+            html += `<div class="error-box" style="background:rgba(245,158,11,0.1);border-color:rgba(245,158,11,0.3);color:#f59e0b;margin-bottom:8px">
+                ⚠️ 所有参数组合在当前回测窗口内均未触发交易。<br>
+                <span style="font-size:0.8rem;color:var(--text-muted)">建议：增加回测天数（如 120-250），或换一只波动更大的股票测试该策略。</span>
+            </div>`;
+        }
+
         if (data.best) {
-            html += '<h4 style="color:var(--accent-green);margin-bottom:8px">🏆 最优参数</h4>';
+            html += '<h4 style="color:var(--accent-green);margin-bottom:8px">🏆 最优参数（样本内 IS）</h4>';
             html += '<div class="metrics-grid">';
             const bestParams = data.best_params || {};
             for (const [k, v] of Object.entries(bestParams)) {
@@ -641,6 +665,38 @@ async function runOptimize() {
                 html += `<div class="metric-item"><div class="metric-label">${k}</div><div class="metric-value" style="font-size:0.9rem">${val}</div></div>`;
             }
             html += '</div>';
+        }
+
+        if (data.oos) {
+            const oos = data.oos;
+            const isRet = data.best?.metrics?.total_return ?? 0;
+            const degBadge = data.overfit_warning
+                ? `<span style="background:rgba(239,68,68,0.15);color:#ef4444;padding:2px 8px;border-radius:4px;font-size:0.75rem;margin-left:8px">⚠ 疑似过拟合</span>`
+                : (data.degradation_pct !== null && data.degradation_pct > 0
+                    ? `<span style="background:rgba(245,158,11,0.15);color:#f59e0b;padding:2px 8px;border-radius:4px;font-size:0.75rem;margin-left:8px">降级 ${data.degradation_pct}%</span>`
+                    : `<span style="background:rgba(34,197,94,0.15);color:#22c55e;padding:2px 8px;border-radius:4px;font-size:0.75rem;margin-left:8px">✓ OOS 稳健</span>`);
+            html += `<h4 style="color:var(--accent-cyan);margin-top:16px;margin-bottom:8px">🧪 样本外验证（OOS，最后 ${Math.round((data.oos_ratio||0.2)*100)}% 数据 / ${oos.trade_days} 天）${degBadge}</h4>`;
+            html += '<div class="metrics-grid">';
+            const oosFields = [
+                { k: 'total_return', label: 'OOS 收益率', fmt: v => `${v.toFixed(2)}%`, color: oos.total_return >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' },
+                { k: 'sharpe_ratio', label: 'OOS 夏普', fmt: v => v.toFixed(2), color: oos.sharpe_ratio >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' },
+                { k: 'max_drawdown', label: 'OOS 回撤', fmt: v => `${v.toFixed(2)}%`, color: 'var(--accent-red)' },
+                { k: 'win_rate', label: 'OOS 胜率', fmt: v => `${v.toFixed(2)}%` },
+                { k: 'total_trades', label: 'OOS 交易', fmt: v => `${v}笔` },
+                { k: 'final_capital', label: 'OOS 终值', fmt: v => `¥${v.toLocaleString()}` },
+            ];
+            oosFields.forEach(f => {
+                const val = oos[f.k];
+                if (val === null || val === undefined) return;
+                html += `<div class="metric-item"><div class="metric-label">${f.label}</div><div class="metric-value" style="font-size:0.9rem;color:${f.color || 'var(--text-primary)'}">${f.fmt(val)}</div></div>`;
+            });
+            html += '</div>';
+            if (data.overfit_warning) {
+                html += `<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:6px;padding:8px 12px;margin-top:8px;font-size:0.8rem;color:#fca5a5">
+                    ⚠ 警告：样本内表现亮眼但样本外明显劣化，最优参数可能仅是历史数据的偶然拟合。<br>
+                    <span style="color:var(--text-muted)">建议：用"Walk-Forward 验证"做多窗口稳健性测试，或换更宽参数网格再扫一次。</span>
+                </div>`;
+            }
         }
 
         if (data.top && data.top.length > 1) {
@@ -659,5 +715,194 @@ async function runOptimize() {
         document.getElementById('optimizeResults').innerHTML = html;
     } catch (e) {
         document.getElementById('optimizeResults').innerHTML = `<div style="color:var(--accent-red)">参数优化失败: ${e.message}</div>`;
+    }
+}
+
+
+async function runWalkforward() {
+    if (!currentCode) { alert('请先搜索并选择一只股票'); return; }
+    if (isLoading) return;
+
+    const capital = parseFloat(document.getElementById('btCapital').value) || 10000;
+    const strategy = document.getElementById('btStrategy').value;
+    const container = document.getElementById('walkforwardResults');
+    container.innerHTML = '<div class="spinner">Walk-Forward 滚动验证中（多窗口扫描，需 1-3 分钟）...</div>';
+
+    try {
+        const resp = await fetch('/api/walkforward', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                code: currentCode, capital, strategy,
+                days: 500, n_windows: 4, train_ratio: 0.67, metric: 'sharpe_ratio',
+            }),
+        });
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        const data = await resp.json();
+        if (data.error) { container.innerHTML = `<div class="error-box">${data.error}</div>`; return; }
+
+        const s = data.summary || {};
+        const isOk = s.oos_return_avg >= 0 && s.oos_sharpe_avg >= 0;
+        const judge = isOk
+            ? `<span style="background:rgba(34,197,94,0.15);color:#22c55e;padding:2px 8px;border-radius:4px;font-size:0.75rem;margin-left:8px">✓ 跨窗口稳健</span>`
+            : `<span style="background:rgba(239,68,68,0.15);color:#ef4444;padding:2px 8px;border-radius:4px;font-size:0.75rem;margin-left:8px">⚠ 样本外失效</span>`;
+
+        let html = `<h4 style="color:var(--accent-cyan);margin-bottom:8px">🧪 Walk-Forward 多窗口验证（${data.n_windows} 窗口）${judge}</h4>`;
+        html += '<div class="metrics-grid">';
+        const summFields = [
+            { k: 'is_return_avg', label: 'IS 收益均值', fmt: v => `${v.toFixed(2)}%`, color: s.is_return_avg >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' },
+            { k: 'oos_return_avg', label: 'OOS 收益均值', fmt: v => `${v.toFixed(2)}%`, color: s.oos_return_avg >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' },
+            { k: 'is_sharpe_avg', label: 'IS 夏普均值', fmt: v => v.toFixed(2) },
+            { k: 'oos_sharpe_avg', label: 'OOS 夏普均值', fmt: v => v.toFixed(2), color: s.oos_sharpe_avg >= 0 ? 'var(--accent-green)' : 'var(--accent-red)' },
+            { k: 'oos_total_trades', label: 'OOS 总交易', fmt: v => `${v}笔` },
+            { k: 'degradation_pct', label: 'IS→OOS 降级', fmt: v => `${v.toFixed(2)}%`, color: s.degradation_pct > 0 ? 'var(--accent-yellow)' : 'var(--accent-green)' },
+        ];
+        summFields.forEach(f => {
+            const v = s[f.k];
+            if (v === null || v === undefined) return;
+            html += `<div class="metric-item"><div class="metric-label">${f.label}</div><div class="metric-value" style="font-size:0.9rem;color:${f.color || 'var(--text-primary)'}">${f.fmt(v)}</div></div>`;
+        });
+        html += '</div>';
+
+        html += '<h4 style="margin-top:16px;margin-bottom:8px;color:var(--text-secondary)">📊 各窗口明细</h4>';
+        html += '<div style="overflow-x:auto"><table style="width:100%;font-size:0.78rem;border-collapse:collapse">';
+        html += '<tr style="color:var(--text-muted)"><th style="padding:4px 6px;text-align:left">窗口</th><th style="padding:4px 6px;text-align:right">IS 收益</th><th style="padding:4px 6px;text-align:right">IS 夏普</th><th style="padding:4px 6px;text-align:right">OOS 收益</th><th style="padding:4px 6px;text-align:right">OOS 夏普</th><th style="padding:4px 6px;text-align:right">OOS 胜率</th><th style="padding:4px 6px;text-align:right">OOS 回撤</th><th style="padding:4px 6px;text-align:right">交易</th></tr>';
+        (data.windows || []).forEach(w => {
+            const oosColor = w.oos_return >= 0 ? 'var(--accent-green)' : 'var(--accent-red)';
+            html += `<tr style="border-bottom:1px solid var(--border-glass)">
+                <td style="padding:4px 6px">W${w.window}</td>
+                <td style="padding:4px 6px;text-align:right">${w.is_return.toFixed(2)}%</td>
+                <td style="padding:4px 6px;text-align:right">${w.is_sharpe.toFixed(2)}</td>
+                <td style="padding:4px 6px;text-align:right;color:${oosColor}">${w.oos_return.toFixed(2)}%</td>
+                <td style="padding:4px 6px;text-align:right;color:${oosColor}">${w.oos_sharpe.toFixed(2)}</td>
+                <td style="padding:4px 6px;text-align:right">${w.oos_win_rate.toFixed(2)}%</td>
+                <td style="padding:4px 6px;text-align:right;color:var(--accent-red)">${w.oos_max_dd.toFixed(2)}%</td>
+                <td style="padding:4px 6px;text-align:right">${w.oos_trades}</td>
+            </tr>`;
+        });
+        html += '</table></div>';
+
+        if (!isOk) {
+            html += `<div style="background:rgba(239,68,68,0.08);border:1px solid rgba(239,68,68,0.3);border-radius:6px;padding:8px 12px;margin-top:10px;font-size:0.8rem;color:#fca5a5">
+                ⚠ 多个窗口 OOS 表现劣化，该策略/参数不具备跨时段稳健性，<b>不建议实盘</b>。
+            </div>`;
+        }
+
+        container.innerHTML = html;
+    } catch (e) {
+        container.innerHTML = `<div style="color:var(--accent-red)">Walk-Forward 失败: ${e.message}</div>`;
+    }
+}
+
+
+async function populateScanStrategies() {
+    try {
+        const resp = await fetch('/api/strategies');
+        const data = await resp.json();
+        const select = document.getElementById('scanStrategy');
+        select.innerHTML = '';
+        for (const [key, strat] of Object.entries(data)) {
+            const opt = document.createElement('option');
+            opt.value = key;
+            opt.textContent = strat.name;
+            select.appendChild(opt);
+        }
+    } catch (e) { console.error('加载扫描策略失败:', e); }
+}
+
+
+async function runScan() {
+    const strategy = document.getElementById('scanStrategy').value;
+    const pool = document.getElementById('scanPool').value;
+    const minScore = parseInt(document.getElementById('scanMinScore').value) || 0;
+    const days = parseInt(document.getElementById('scanDays').value) || 200;
+    const container = document.getElementById('scanResults');
+
+    const body = { strategy, min_score: minScore, days };
+    if (pool === '__custom__') {
+        const raw = document.getElementById('scanCustomCodes').value.trim();
+        const codes = raw.split(/[,，\s]+/).map(c => c.trim()).filter(Boolean);
+        if (!codes.length) { container.innerHTML = '<div class="error-box">请输入至少一个股票代码</div>'; return; }
+        body.codes = codes;
+    } else {
+        body.pool = pool;
+    }
+
+    container.innerHTML = '<div class="spinner">扫描中… 每只股票需拉取 K 线数据，4 线程并行。<br><span style="font-size:0.8rem;color:var(--text-muted)">预设池约 10-30 秒，动态市场池（500 只采样）约 60-90 秒。</span></div>';
+    try {
+        const resp = await fetch('/api/scan', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(body),
+        });
+        if (!resp.ok) {
+            const txt = await resp.text();
+            container.innerHTML = `<div class="error-box">扫描失败: ${txt.substring(0,200)}</div>`;
+            return;
+        }
+        const data = await resp.json();
+        if (data.error) { container.innerHTML = `<div class="error-box">${data.error}</div>`; return; }
+
+        const hits = data.hits || [];
+        const ranked = data.ranked || [];
+
+        const skipped = data.skipped || 0;
+        let html = `<div style="font-size:0.85rem;color:var(--text-muted);margin-bottom:8px">
+            池容量 ${data.pool_size} · 有效扫描 ${data.scanned} · 跳过 ${skipped} (停牌/退市/无效)
+            · 信号命中 <b style="color:var(--accent-cyan)">${hits.length}</b> 只
+        </div>`;
+
+        if (hits.length > 0) {
+            html += '<h4 style="color:var(--accent-green);margin-top:12px;margin-bottom:6px">🟢 策略信号命中 (' + strategy + ')</h4>';
+            html += '<table style="width:100%;font-size:0.85rem;border-collapse:collapse">';
+            html += '<tr style="color:var(--text-muted)"><th style="padding:6px 8px;text-align:left">代码</th><th style="padding:6px 8px;text-align:right">现价</th><th style="padding:6px 8px;text-align:right">总分</th><th style="padding:6px 8px;text-align:left">评分信号</th><th style="padding:6px 8px;text-align:right">止损</th><th style="padding:6px 8px;text-align:right">止盈</th><th style="padding:6px 8px;text-align:left">操作</th></tr>';
+            hits.forEach(h => {
+                const tagCls = h.signal_label?.includes('买入') ? 'tag-buy' : h.signal_label?.includes('卖出') ? 'tag-sell' : 'tag-watch';
+                html += `<tr style="border-bottom:1px solid var(--border-glass);background:rgba(34,197,94,0.04)">
+                    <td style="padding:6px 8px;font-weight:600">${h.code}</td>
+                    <td style="padding:6px 8px;text-align:right">${h.price}</td>
+                    <td style="padding:6px 8px;text-align:right;color:${h.total_score >= 60 ? 'var(--accent-green)' : 'var(--accent-yellow)'}">${h.total_score}</td>
+                    <td style="padding:6px 8px"><span class="tag ${tagCls}">${h.signal_label || '-'}</span> <span class="tag tag-buy" style="font-size:0.7rem;margin-left:4px">策略触发</span></td>
+                    <td style="padding:6px 8px;text-align:right;color:var(--accent-red)">${h.stop_price ?? '-'}</td>
+                    <td style="padding:6px 8px;text-align:right;color:var(--accent-green)">${h.take_price ?? '-'}</td>
+                    <td style="padding:6px 8px"><a href="#" data-code="${h.code}" class="scan-load-link" style="color:var(--accent-cyan);text-decoration:none">分析 →</a></td>
+                </tr>`;
+            });
+            html += '</table>';
+        }
+
+        if (ranked.length > 0) {
+            html += `<h4 style="color:var(--text-secondary);margin-top:16px;margin-bottom:6px">📋 全池排名（按综合评分降序）<span style="font-size:0.75rem;color:var(--text-muted);font-weight:400"> — 带 <span class="tag tag-buy" style="font-size:0.65rem">策略触发</span> 标签的已被当前策略选中</span></h4>`;
+            html += '<div style="max-height:400px;overflow-y:auto"><table style="width:100%;font-size:0.85rem;border-collapse:collapse">';
+            html += '<tr style="color:var(--text-muted);position:sticky;top:0;background:var(--bg-card)"><th style="padding:6px 8px;text-align:left">#</th><th style="padding:6px 8px;text-align:left">代码</th><th style="padding:6px 8px;text-align:right">现价</th><th style="padding:6px 8px;text-align:right">总分</th><th style="padding:6px 8px;text-align:left">评分信号</th><th style="padding:6px 8px;text-align:right">趋势</th><th style="padding:6px 8px;text-align:right">量价</th><th style="padding:6px 8px;text-align:left">操作</th></tr>';
+            ranked.forEach((h, idx) => {
+                const tagCls = h.signal_label?.includes('买入') ? 'tag-buy' : h.signal_label?.includes('卖出') ? 'tag-sell' : 'tag-watch';
+                const stratTriggered = h.signal_triggered ? '<span class="tag tag-buy" style="font-size:0.65rem;margin-left:4px">策略触发</span>' : '';
+                const bgStyle = h.signal_triggered ? 'background:rgba(34,197,94,0.04)' : '';
+                html += `<tr style="border-bottom:1px solid var(--border-glass);${bgStyle}">
+                    <td style="padding:6px 8px;color:var(--text-muted)">${idx + 1}</td>
+                    <td style="padding:6px 8px;font-weight:600">${h.code}</td>
+                    <td style="padding:6px 8px;text-align:right">${h.price}</td>
+                    <td style="padding:6px 8px;text-align:right;color:${h.total_score >= 60 ? 'var(--accent-green)' : 'var(--accent-yellow)'}">${h.total_score}</td>
+                    <td style="padding:6px 8px"><span class="tag ${tagCls}">${h.signal_label || '-'}</span>${stratTriggered}</td>
+                    <td style="padding:6px 8px;text-align:right">${h.trend_score ?? '-'}</td>
+                    <td style="padding:6px 8px;text-align:right">${h.volume_score ?? '-'}</td>
+                    <td style="padding:6px 8px"><a href="#" data-code="${h.code}" class="scan-load-link" style="color:var(--accent-cyan);text-decoration:none">分析 →</a></td>
+                </tr>`;
+            });
+            html += '</table></div>';
+        }
+        container.innerHTML = html;
+        container.querySelectorAll('.scan-load-link').forEach(a => {
+            a.addEventListener('click', e => {
+                e.preventDefault();
+                const code = a.dataset.code;
+                document.getElementById('searchInput').value = code;
+                loadStock(code);
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+            });
+        });
+    } catch (e) {
+        container.innerHTML = `<div style="color:var(--accent-red)">扫描请求失败: ${e.message}</div>`;
     }
 }
