@@ -1,68 +1,5 @@
 import numpy as np
-
-
-def _ma(arr, period):
-    n = len(arr)
-    result = np.full(n, np.nan)
-    for i in range(period - 1, n):
-        result[i] = np.mean(arr[i - period + 1:i + 1])
-    return result
-
-
-def _ema(arr, period):
-    n = len(arr)
-    result = np.full(n, np.nan)
-    alpha = 2 / (period + 1)
-    result[0] = arr[0]
-    for i in range(1, n):
-        result[i] = arr[i] * alpha + result[i - 1] * (1 - alpha)
-    return result
-
-
-def _macd(arr, fast=12, slow=26, signal=9):
-    ema_fast = _ema(arr, fast)
-    ema_slow = _ema(arr, slow)
-    dif = ema_fast - ema_slow
-    dea = _ema(dif, signal)
-    hist = (dif - dea) * 2
-    return dif, dea, hist
-
-
-def _rsi(arr, period=14):
-    n = len(arr)
-    rsi = np.full(n, np.nan)
-    deltas = np.diff(arr)
-    gains = np.where(deltas > 0, deltas, 0)
-    losses = np.where(deltas < 0, -deltas, 0)
-    
-    avg_gain = np.zeros(n)
-    avg_loss = np.zeros(n)
-    
-    if n > period:
-        avg_gain[period] = np.mean(gains[:period])
-        avg_loss[period] = np.mean(losses[:period])
-        
-        for i in range(period + 1, n):
-            avg_gain[i] = (avg_gain[i - 1] * (period - 1) + gains[i - 1]) / period
-            avg_loss[i] = (avg_loss[i - 1] * (period - 1) + losses[i - 1]) / period
-    
-    for i in range(period, n):
-        if avg_loss[i] == 0:
-            rsi[i] = 100
-        else:
-            rs = avg_gain[i] / avg_loss[i]
-            rsi[i] = 100 - (100 / (1 + rs))
-    return rsi
-
-
-def _boll(arr, period=20, std_dev=2):
-    middle = _ma(arr, period)
-    std = np.full_like(middle, np.nan)
-    for i in range(period - 1, len(arr)):
-        std[i] = np.std(arr[i - period + 1:i + 1])
-    upper = middle + std_dev * std
-    lower = middle - std_dev * std
-    return upper, middle, lower
+from .indicators import MA as _ma, EMA as _ema, MACD as _macd, RSI as _rsi, BOLL as _boll
 
 
 def multi_factor_resonance(close, high, low, open_arr, i, position, **params):
@@ -350,46 +287,52 @@ def dual_thrust_exit(close, high, low, i, entry_price, position, entry_bar, **pa
     return 0
 
 
+_ha_cache = {}
+
+def _get_ha_arrays(close, high, low):
+    cache_key = id(close)
+    if cache_key in _ha_cache:
+        return _ha_cache[cache_key]
+    n = len(close)
+    ha_open = np.full(n, np.nan)
+    ha_close = np.full(n, np.nan)
+    ha_open[0] = close[0]
+    ha_close[0] = (close[0] + close[0] + high[0] + low[0]) / 4
+    for j in range(1, n):
+        ha_open[j] = (ha_open[j - 1] + ha_close[j - 1]) / 2
+        ha_close[j] = (ha_open[j] + close[j] + high[j] + low[j]) / 4
+    _ha_cache.clear()
+    _ha_cache[cache_key] = (ha_open, ha_close)
+    return ha_open, ha_close
+
+
 def heikin_ashi(close, high, low, open_arr, i, position, **params):
     if i < 2:
         return 0
 
-    def ha_transform(idx):
-        ha_close = (open_p[idx] + close[idx] + high[idx] + low[idx]) / 4
-        return ha_close
+    ha_open, ha_close = _get_ha_arrays(close, high, low)
 
-    open_p = np.full(len(close), np.nan)
-    open_p[0] = close[0]
-    for j in range(1, len(close)):
-        ha_close_prev = (open_p[j - 1] + close[j - 1] + high[j - 1] + low[j - 1]) / 4
-        open_p[j] = (open_p[j - 1] + ha_close_prev) / 2
+    ha_high = max(ha_open[i], ha_close[i], high[i])
+    ha_low = min(ha_open[i], ha_close[i], low[i])
 
-    ha_open = open_p[i]
-    ha_close = (open_p[i] + close[i] + high[i] + low[i]) / 4
-    ha_high = max(ha_open, ha_close, high[i])
-    ha_low = min(ha_open, ha_close, low[i])
+    body = abs(ha_open[i] - ha_close[i])
+    body_prev = abs(ha_open[i - 1] - ha_close[i - 1])
 
-    ha_open_prev = open_p[i - 1]
-    ha_close_prev = (open_p[i - 1] + close[i - 1] + high[i - 1] + low[i - 1]) / 4
-
-    body = abs(ha_open - ha_close)
-    body_prev = abs(ha_open_prev - ha_close_prev)
-
-    is_green = ha_close > ha_open
-    is_red = ha_open > ha_close
-    is_marubozu_green = is_green and ha_open == ha_low
-    is_marubozu_red = is_red and ha_open == ha_high
+    is_green = ha_close[i] > ha_open[i]
+    is_red = ha_open[i] > ha_close[i]
+    is_marubozu_green = is_green and ha_open[i] == ha_low
+    is_marubozu_red = is_red and ha_open[i] == ha_high
     body_growing = body > body_prev
 
-    if is_marubozu_green and body_growing and ha_open_prev > ha_close_prev:
+    if is_marubozu_green and body_growing and ha_open[i - 1] > ha_close[i - 1]:
         return 1
     if position < 0:
-        if is_marubozu_red and ha_open_prev < ha_close_prev:
+        if is_marubozu_red and ha_open[i - 1] < ha_close[i - 1]:
             return 1
-    if is_marubozu_red and body_growing and ha_open_prev < ha_close_prev:
+    if is_marubozu_red and body_growing and ha_open[i - 1] < ha_close[i - 1]:
         return -1
     if position > 0:
-        if is_marubozu_green and ha_open_prev > ha_close_prev:
+        if is_marubozu_green and ha_open[i - 1] > ha_close[i - 1]:
             return -1
     return 0
 
@@ -398,53 +341,64 @@ def heikin_ashi_exit(close, high, low, i, entry_price, position, entry_bar, **pa
     return 0
 
 
+_sar_cache = {}
+
+def _get_sar_arrays(close, high, low):
+    cache_key = id(close)
+    if cache_key in _sar_cache:
+        return _sar_cache[cache_key]
+    n = len(close)
+    sar = np.zeros(n)
+    trend = np.zeros(n, dtype=int)
+    ep = np.zeros(n)
+    af = np.zeros(n)
+
+    initial_af = 0.02
+    step_af = 0.02
+    end_af = 0.2
+
+    if n < 2:
+        _sar_cache.clear()
+        _sar_cache[cache_key] = (sar, trend)
+        return sar, trend
+
+    trend[1] = 1 if close[1] > close[0] else -1
+    sar[1] = low[0] if trend[1] > 0 else high[0]
+    ep[1] = high[1] if trend[1] > 0 else low[1]
+    af[1] = initial_af
+
+    for j in range(2, n):
+        temp = sar[j - 1] + af[j - 1] * (ep[j - 1] - sar[j - 1])
+        if trend[j - 1] < 0:
+            sar[j] = max(temp, high[j - 1], high[j - 2])
+            trend[j] = 1 if sar[j] < high[j] else trend[j - 1] - 1
+        else:
+            sar[j] = min(temp, low[j - 1], low[j - 2])
+            trend[j] = -1 if sar[j] > low[j] else trend[j - 1] + 1
+
+        if trend[j] < 0:
+            ep[j] = min(low[j], ep[j - 1]) if trend[j] != -1 else low[j]
+        else:
+            ep[j] = max(high[j], ep[j - 1]) if trend[j] != 1 else high[j]
+
+        if abs(trend[j]) == 1:
+            af[j] = initial_af
+        else:
+            if ep[j] == ep[j - 1]:
+                af[j] = af[j - 1]
+            else:
+                af[j] = min(end_af, af[j - 1] + step_af)
+
+    _sar_cache.clear()
+    _sar_cache[cache_key] = (sar, trend)
+    return sar, trend
+
+
 def parabolic_sar(close, high, low, open_arr, i, position, **params):
     if i < 3:
         return 0
 
-    def calc_sar(data_high, data_low, data_close):
-        n = len(data_close)
-        sar = np.zeros(n)
-        trend = np.zeros(n, dtype=int)
-        ep = np.zeros(n)
-        af = np.zeros(n)
-
-        initial_af = 0.02
-        step_af = 0.02
-        end_af = 0.2
-
-        trend[1] = 1 if data_close[1] > data_close[0] else -1
-        sar[1] = data_low[0] if trend[1] > 0 else data_high[0]
-        ep[1] = data_high[1] if trend[1] > 0 else data_low[1]
-        af[1] = initial_af
-
-        for j in range(2, n):
-            temp = sar[j - 1] + af[j - 1] * (ep[j - 1] - sar[j - 1])
-            if trend[j - 1] < 0:
-                sar[j] = max(temp, data_high[j - 1], data_high[j - 2])
-                trend[j] = 1 if sar[j] < data_high[j] else trend[j - 1] - 1
-            else:
-                sar[j] = min(temp, data_low[j - 1], data_low[j - 2])
-                trend[j] = -1 if sar[j] > data_low[j] else trend[j - 1] + 1
-
-            if trend[j] < 0:
-                ep[j] = min(data_low[j], ep[j - 1]) if trend[j] != -1 else data_low[j]
-            else:
-                ep[j] = max(data_high[j], ep[j - 1]) if trend[j] != 1 else data_high[j]
-
-            if abs(trend[j]) == 1:
-                af[j] = initial_af
-            else:
-                if ep[j] == ep[j - 1]:
-                    af[j] = af[j - 1]
-                else:
-                    af[j] = min(end_af, af[j - 1] + step_af)
-
-        return sar, trend
-
-    sar_vals, trend = calc_sar(
-        high[:i + 1], low[:i + 1], close[:i + 1]
-    )
+    sar_vals, trend = _get_sar_arrays(close, high, low)
 
     if trend[i] > 0 and sar_vals[i] < close[i]:
         if position <= 0:
@@ -462,15 +416,6 @@ def parabolic_sar_exit(close, high, low, i, entry_price, position, entry_bar, **
 def ema_crossover(close, high, low, open_arr, i, position, **params):
     if i < 2 or position != 0:
         return 0
-
-    def _ema(arr, period):
-        n = len(arr)
-        result = np.full(n, np.nan)
-        alpha = 2 / (period + 1)
-        result[0] = arr[0]
-        for j in range(1, n):
-            result[j] = arr[j] * alpha + result[j - 1] * (1 - alpha)
-        return result
 
     fast = params.get("ema_fast", 12)
     slow = params.get("ema_slow", 26)

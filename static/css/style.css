@@ -1,5 +1,10 @@
 * { margin: 0; padding: 0; box-sizing: border-box; }
 
+.tag { display: inline-block; padding: 2px 8px; border-radius: 4px; font-size: 0.78rem; font-weight: 600; }
+.tag-buy { background: rgba(34,197,94,0.15); color: #22c55e; }
+.tag-watch { background: rgba(245,158,11,0.15); color: #f59e0b; }
+.tag-sell { background: rgba(239,68,68,0.15); color: #ef4444; }
+
 :root {
   --bg-primary: #0a0e17;
   --bg-secondary: #111827;
@@ -161,6 +166,20 @@ body::before {
 
 @media (max-width: 1200px) {
   .main-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* Action Row — backtest + scanner side by side */
+.action-row {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+  margin-top: 24px;
+}
+
+@media (max-width: 1200px) {
+  .action-row {
     grid-template-columns: 1fr;
   }
 }
@@ -364,6 +383,8 @@ body::before {
 
 .backtest-results {
   margin-top: 16px;
+  max-height: 600px;
+  overflow-y: auto;
 }
 
 .metrics-grid {

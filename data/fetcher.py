@@ -5,10 +5,10 @@ import pandas as pd
 import numpy as np
 import codecs
 import time
+import threading
 import logging
 from datetime import datetime
 from typing import Optional
-from functools import lru_cache
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -20,14 +20,16 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 # 请求速率限制
 _last_request_time = 0
 _MIN_REQUEST_INTERVAL = 0.3  # 最小请求间隔（秒）
+_rate_lock = threading.Lock()
 
 def _rate_limit():
     global _last_request_time
-    now = time.time()
-    elapsed = now - _last_request_time
-    if elapsed < _MIN_REQUEST_INTERVAL:
-        time.sleep(_MIN_REQUEST_INTERVAL - elapsed)
-    _last_request_time = time.time()
+    with _rate_lock:
+        now = time.time()
+        elapsed = now - _last_request_time
+        if elapsed < _MIN_REQUEST_INTERVAL:
+            time.sleep(_MIN_REQUEST_INTERVAL - elapsed)
+        _last_request_time = time.time()
 
 
 def _get_qcode(code: str) -> str:
@@ -149,8 +151,14 @@ def _do_fetch_kline(market: str, bare: str, days: int) -> list:
                 return []
 
             kline_data = data.get("data", {})
+            if not isinstance(kline_data, dict):
+                logger.warning(f"K线 data 字段非 dict: {market}{bare}, type={type(kline_data).__name__}")
+                return []
             stock_data = kline_data.get(f"{market}{bare}", kline_data)
-            days_data = stock_data.get("day", [])
+            if not isinstance(stock_data, dict):
+                logger.warning(f"K线 stock 字段非 dict: {market}{bare}")
+                return []
+            days_data = stock_data.get("day") or stock_data.get("qfqday") or []
 
             if not days_data:
                 logger.warning(f"K线数据为空: {market}{bare}, 尝试 {attempt+1}/3")
@@ -274,14 +282,5 @@ def search_stocks(keyword: str) -> list:
             logger.debug(f"Search fallback request failed: {kw}, {e}")
         except Exception as e:
             logger.debug(f"Search fallback error: {kw}, {e}")
-
-        name_map = {"6": "上海", "0": "深圳", "3": "创业板", "8": "北京", "4": "北京", "5": "上海"}
-        prefix = code[0]
-        market_name = name_map.get(prefix, "")
-        results.append({
-            "code": code,
-            "name": f"{kw}",
-            "market": "sh" if code.startswith(("6", "5", "9")) else "sz",
-        })
 
     return results

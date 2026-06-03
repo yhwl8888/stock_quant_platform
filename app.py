@@ -1,23 +1,32 @@
 from flask import Flask, jsonify, request, render_template
 from flask_cors import CORS
-import json
 import os
+import re
 import time
-from functools import lru_cache
-
+import threading
+import numpy as np
 from data.fetcher import fetch_realtime_quote, fetch_kline, search_stocks
 from engine.indicators import MA, MACD, RSI, KDJ, BOLL, OBV, ATR, detect_support_resistance
 from engine.scoring import comprehensive_score
 from engine.backtest import run_backtest
 from engine.strategies import STRATEGIES
 from engine.optimizer import optimize, get_param_grid
+from engine.walkforward import walk_forward
+from engine.scanner import scan_pool, PRESET_POOLS, DYNAMIC_POOL_SLUGS, _gen_dynamic_codes, get_preset_pools
 
 app = Flask(__name__)
 CORS(app)
 
-# 简单 TTL 缓存：只缓存成功结果，失败不缓存
 _kline_cache = {}
-_CACHE_TTL = 300  # 5分钟
+_CACHE_TTL = 300
+_CACHE_MAX_SIZE = 100
+_kline_locks = {}
+_locks_guard = threading.Lock()
+
+_VALID_CODE_RE = re.compile(r"^(?:sh|sz|bj)?\d{4,6}$", re.IGNORECASE)
+
+def _is_valid_code(code: str) -> bool:
+    return bool(code) and bool(_VALID_CODE_RE.match(code.strip()))
 
 def get_kline_cached(code: str, days: int):
     cache_key = f"{code}:{days}"
@@ -26,10 +35,22 @@ def get_kline_cached(code: str, days: int):
         cached_time, cached_data = _kline_cache[cache_key]
         if now - cached_time < _CACHE_TTL and cached_data:
             return cached_data
-    result = fetch_kline(code, days)
-    if result:  # 只缓存成功结果
-        _kline_cache[cache_key] = (now, result)
-    return result
+
+    with _locks_guard:
+        lock = _kline_locks.setdefault(cache_key, threading.Lock())
+
+    with lock:
+        if cache_key in _kline_cache:
+            cached_time, cached_data = _kline_cache[cache_key]
+            if time.time() - cached_time < _CACHE_TTL and cached_data:
+                return cached_data
+        result = fetch_kline(code, days)
+        if result:
+            if len(_kline_cache) >= _CACHE_MAX_SIZE:
+                oldest_key = min(_kline_cache, key=lambda k: _kline_cache[k][0])
+                del _kline_cache[oldest_key]
+            _kline_cache[cache_key] = (time.time(), result)
+        return result
 
 @app.route("/")
 def index():
@@ -56,6 +77,8 @@ def quote(code: str):
 
 @app.route("/api/kline/<code>")
 def kline(code: str):
+    if not _is_valid_code(code):
+        return jsonify({"data": [], "error": "非法股票代码"}), 400
     days = request.args.get("days", 250, type=int)
     data = get_kline_cached(code, days)
     if data:
@@ -74,7 +97,6 @@ def indicators(code: str):
     low = [d["low"] for d in kline_data]
     volume = [d["volume"] for d in kline_data]
 
-    import numpy as np
     close_arr = np.array(close, dtype=float)
     high_arr = np.array(high, dtype=float)
     low_arr = np.array(low, dtype=float)
@@ -93,7 +115,6 @@ def indicators(code: str):
     supports, resistances = detect_support_resistance(high_arr, low_arr, close_arr)
 
     def _clean_series(arr):
-        import numpy as np
         if arr is None:
             return []
         return [None if np.isnan(v) else round(float(v), 4) for v in arr]
@@ -162,7 +183,7 @@ def backtest():
         close=close,
         high=high,
         low=low,
-        open=open_p,
+        open_prices=open_p,
         volume=volume,
         initial_capital=initial_capital,
         atr_stop_mult=atr_stop,
@@ -182,6 +203,7 @@ def optimize_endpoint():
     trade_days = int(body.get("trade_days", 60))
     strategy = body.get("strategy", "ma_crossover")
     metric = body.get("metric", "sharpe_ratio")
+    oos_ratio = float(body.get("oos_ratio", 0.2))
 
     kline_data = get_kline_cached(code, days)
     if not kline_data:
@@ -197,12 +219,13 @@ def optimize_endpoint():
         close=close,
         high=high,
         low=low,
-        open=open_p,
+        open_prices=open_p,
         volume=volume,
         initial_capital=initial_capital,
         strategy_name=strategy,
         trade_days=trade_days,
         metric=metric,
+        oos_ratio=oos_ratio,
     )
     return jsonify(result)
 
@@ -213,10 +236,92 @@ def list_strategies():
     return jsonify(data)
 
 
+@app.route("/api/walkforward", methods=["POST"])
+def walkforward_endpoint():
+    body = request.get_json()
+    code = body.get("code", "")
+    if not _is_valid_code(code):
+        return jsonify({"error": "非法股票代码"}), 400
+    days = int(body.get("days", 500))
+    initial_capital = float(body.get("capital", 10000))
+    strategy = body.get("strategy", "ma_crossover")
+    metric = body.get("metric", "sharpe_ratio")
+    n_windows = int(body.get("n_windows", 4))
+    train_ratio = float(body.get("train_ratio", 0.67))
+
+    kline_data = get_kline_cached(code, days)
+    if not kline_data:
+        return jsonify({"error": "无法获取K线数据"}), 404
+
+    close = [d["close"] for d in kline_data]
+    high = [d["high"] for d in kline_data]
+    low = [d["low"] for d in kline_data]
+    open_p = [d["open"] for d in kline_data]
+    volume = [d["volume"] for d in kline_data]
+
+    result = walk_forward(
+        close=close, high=high, low=low,
+        open_prices=open_p, volume=volume,
+        initial_capital=initial_capital,
+        strategy_name=strategy,
+        metric=metric,
+        n_windows=n_windows,
+        train_ratio=train_ratio,
+    )
+    return jsonify(result)
+
+
 @app.route("/api/strategies/<name>/params")
 def strategy_params(name: str):
     grid = get_param_grid(name)
     return jsonify(grid)
+
+
+@app.route("/api/scan/pools")
+def list_scan_pools():
+    return jsonify(get_preset_pools())
+
+
+@app.route("/api/scan", methods=["POST"])
+def scan_endpoint():
+    body = request.get_json()
+    strategy = body.get("strategy", "ma_crossover")
+    min_score = int(body.get("min_score", 60))
+    days = int(body.get("days", 200))
+    pool_name = body.get("pool", "")
+    codes = body.get("codes") or []
+    max_workers = int(body.get("max_workers", 4))
+
+    MAX_CODES = 500
+    DYNAMIC_MAP = {
+        "all_sh60": ("60", 4500),
+        "all_sh68": ("688", 700),
+        "all_sz00": ("00", 3000),
+        "all_sz30": ("30", 1400),
+    }
+
+    if pool_name:
+        if pool_name in DYNAMIC_POOL_SLUGS and pool_name in DYNAMIC_MAP:
+            prefix, count = DYNAMIC_MAP[pool_name]
+            # 动态生成代码 → 但要对超出部分做采样以减少扫描时间
+            all_codes = _gen_dynamic_codes(prefix, count)
+            if len(all_codes) > MAX_CODES:
+                import random
+                random.seed(42)
+                random.shuffle(all_codes)
+                all_codes = all_codes[:MAX_CODES]
+            codes = all_codes
+        else:
+            codes = PRESET_POOLS.get(pool_name, [])
+
+    codes = [c for c in codes if _is_valid_code(c)]
+    if not codes:
+        return jsonify({"error": "未指定有效股票池"}), 400
+
+    result = scan_pool(codes, strategy_name=strategy,
+                       min_total_score=min_score, days=days,
+                       max_workers=max_workers)
+    return jsonify(result)
 
 
 @app.route("/api/support-resistance/<code>")
@@ -226,7 +331,6 @@ def support_resistance(code: str):
     if not kline_data:
         return jsonify({"error": "无法获取K线数据"}), 404
 
-    import numpy as np
     high = np.array([d["high"] for d in kline_data], dtype=float)
     low = np.array([d["low"] for d in kline_data], dtype=float)
     close = np.array([d["close"] for d in kline_data], dtype=float)
@@ -238,9 +342,10 @@ def support_resistance(code: str):
         "current_price": round(float(close[-1]), 2),
     })
 
-port = int(os.environ.get("PORT", 8000))
-try:
-    from waitress import serve
-    serve(app, host="0.0.0.0", port=port)
-except ImportError:
-    app.run(host="0.0.0.0", port=port, debug=False)
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    try:
+        from waitress import serve
+        serve(app, host="0.0.0.0", port=port)
+    except ImportError:
+        app.run(host="0.0.0.0", port=port, debug=False)

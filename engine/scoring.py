@@ -55,6 +55,8 @@ def score_trend(df: dict) -> tuple:
 
     # Trend consistency (8 pts)
     cons_score = 0
+    short_trend = 0.0
+    long_trend = 0.0
     if n > 20:
         short_trend = (ma5[-1] - ma5[-5]) / ma5[-5] * 100 if not np.isnan(ma5[-5]) else 0
         long_trend = (ma20[-1] - ma20[-10]) / ma20[-10] * 100 if not np.isnan(ma20[-10]) else 0
@@ -142,6 +144,8 @@ def score_volume_price(df: dict) -> tuple:
 
     # Volume pattern (13 pts)
     vol_score = 0
+    avg_vol_5 = 0.0
+    avg_vol_20 = 0.0
     if n >= 10:
         avg_vol_5 = np.mean(volume[-5:])
         avg_vol_20 = np.mean(volume[-20:]) if n >= 20 else avg_vol_5
@@ -168,6 +172,7 @@ def score_volume_price(df: dict) -> tuple:
 
     # OBV (12 pts)
     obv_score = 0
+    obv_slope = 0.0
     obv_vals = OBV(close, volume)
     if n >= 10:
         obv_slope = (obv_vals[-1] - obv_vals[-5]) / obv_vals[-5] * 100 if obv_vals[-5] != 0 else 0
@@ -203,6 +208,7 @@ def score_position_movement(df: dict) -> tuple:
 
     # Bollinger position (10 pts)
     boll_score = 0
+    pos = 0.5
     upper, middle, lower = BOLL(close)
     if not np.isnan(upper[-1]):
         pos = (close[-1] - lower[-1]) / (upper[-1] - lower[-1]) if upper[-1] != lower[-1] else 0.5
@@ -239,7 +245,9 @@ def score_position_movement(df: dict) -> tuple:
     if not supports and not resistances:
         sr_score = 0
     score += sr_score
-    details["支撑阻力"] = {"score": sr_score, "desc": f"支撑={supports} 阻力={resistances}"}
+    supports_str = [float(s) for s in supports]
+    resistances_str = [float(r) for r in resistances]
+    details["支撑阻力"] = {"score": sr_score, "desc": f"支撑={supports_str} 阻力={resistances_str}"}
 
     return max(0, min(20, score)), details
 

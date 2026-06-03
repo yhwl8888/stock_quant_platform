@@ -14,10 +14,3 @@ GRID_CONFIG = {
     "止损比例": 0.05,
     "止盈比例": 0.10,
 }
-
-STRATEGY_OPTIONS = [
-    {"id": "ma_crossover", "name": "MA5/MA20 金叉", "desc": "MA5上穿MA20买入，下穿卖出"},
-    {"id": "dual_thrust", "name": "Dual Thrust 通道突破", "desc": "基于前N日价格范围设定突破通道"},
-    {"id": "heikin_ashi", "name": "Heikin-Ashi 均值K线", "desc": "Heikin-Ashi蜡烛图形态识别"},
-    {"id": "parabolic_sar", "name": "Parabolic SAR 抛物线", "desc": "抛物线指标趋势跟踪"},
-]

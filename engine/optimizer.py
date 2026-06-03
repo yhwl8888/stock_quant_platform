@@ -1,6 +1,9 @@
 import itertools
+import logging
 import numpy as np
 from .backtest import run_backtest
+
+logger = logging.getLogger(__name__)
 
 
 PARAM_GRID = {
@@ -55,9 +58,9 @@ PARAM_GRID = {
     },
     "boll_rsi_mean_reversion": {
         "boll_period": {"values": [20], "label": "布林带周期"},
-        "boll_std": {"values": [1.5, 2.0], "label": "布林带标准差"},
+        "boll_std": {"values": [1.2, 1.5, 2.0], "label": "布林带标准差"},
         "rsi_period": {"values": [14], "label": "RSI周期"},
-        "rsi_low": {"values": [20, 30], "label": "RSI超卖阈值"},
+        "rsi_low": {"values": [20, 25, 30, 35, 40], "label": "RSI超卖阈值"},
         "rsi_high": {"values": [70, 80], "label": "RSI超买阈值"},
         "hold_days": {"values": [5, 8], "label": "持有天数"},
         "atr_stop_mult": {"values": [1.5, 2.0], "label": "ATR止损倍数"},
@@ -86,14 +89,30 @@ def get_param_grid(strategy_name: str):
     return PARAM_GRID.get(strategy_name, {})
 
 
-def optimize(close, high, low, open=None, volume=None,
+def optimize(close, high, low, open_prices=None, volume=None,
              initial_capital=10000,
              strategy_name="ma_crossover",
              trade_days=60,
-             metric="sharpe_ratio") -> dict:
+             metric="sharpe_ratio",
+             oos_ratio: float = 0.2) -> dict:
+    """80/20 切分：前 80% 做参数搜索（IS），后 20% 用最优参数验证（OOS）。"""
     grid = get_param_grid(strategy_name)
     if not grid:
         return {"error": f"策略 {strategy_name} 无优化参数"}
+
+    n = len(close)
+    if n < 80:
+        return {"error": "数据不足，至少需要 80 个交易日"}
+
+    oos_ratio = max(0.0, min(0.5, oos_ratio))
+    split = int(n * (1 - oos_ratio)) if oos_ratio > 0 else n
+    is_close = close[:split]
+    is_high = high[:split]
+    is_low = low[:split]
+    is_open = open_prices[:split] if open_prices is not None else None
+    is_vol = volume[:split] if volume is not None else None
+
+    is_trade_days = min(trade_days, max(30, split - 30))
 
     param_names = list(grid.keys())
     param_values = [grid[p]["values"] for p in param_names]
@@ -106,11 +125,9 @@ def optimize(close, high, low, open=None, volume=None,
     total = 1
     for v in param_values:
         total *= len(v)
-    
-    # 限制最大组合数，防止超时
+
     MAX_COMBINATIONS = 200
     if total > MAX_COMBINATIONS:
-        # 如果组合太多，就随机采样
         import random
         random.seed(42)
         all_combos = list(itertools.product(*param_values))
@@ -118,32 +135,28 @@ def optimize(close, high, low, open=None, volume=None,
         combos = all_combos[:MAX_COMBINATIONS]
         total_display = f"{MAX_COMBINATIONS}/{total}"
     else:
-        combos = itertools.product(*param_values)
+        combos = list(itertools.product(*param_values))
         total_display = str(total)
 
     count = 0
     for combo in combos:
-        # 只把策略参数和标准的回测参数分开
         strategy_params = {param_names[i]: combo[i] for i in range(len(param_names))}
-        
+
         atr_stop = strategy_params.pop("atr_stop_mult", 2.0)
         atr_take = strategy_params.pop("atr_take_mult", 3.0)
 
         try:
             result = run_backtest(
-                close=close,
-                high=high,
-                low=low,
-                open=open,
-                volume=volume,
+                close=is_close, high=is_high, low=is_low,
+                open_prices=is_open, volume=is_vol,
                 initial_capital=initial_capital,
-                atr_stop_mult=atr_stop,
-                atr_take_mult=atr_take,
-                trade_days=trade_days,
+                atr_stop_mult=atr_stop, atr_take_mult=atr_take,
+                trade_days=is_trade_days,
                 strategy_name=strategy_name,
                 **strategy_params
             )
-        except Exception:
+        except Exception as e:
+            logger.warning(f"回测异常 (组合 {count+1}): {type(e).__name__}: {e}")
             count += 1
             continue
 
@@ -181,6 +194,46 @@ def optimize(close, high, low, open=None, volume=None,
     all_results.sort(key=lambda x: x["score"], reverse=True)
     top_n = [r for r in all_results[:10] if r["score"] > -999]
 
+    oos_result = None
+    if best_params and oos_ratio > 0 and split < n:
+        oos_params = dict(best_params)
+        atr_stop = oos_params.pop("atr_stop_mult", 2.0)
+        atr_take = oos_params.pop("atr_take_mult", 3.0)
+        oos_trade_days = n - split
+        try:
+            oos_run = run_backtest(
+                close=close, high=high, low=low,
+                open_prices=open_prices, volume=volume,
+                initial_capital=initial_capital,
+                atr_stop_mult=atr_stop, atr_take_mult=atr_take,
+                trade_days=oos_trade_days,
+                strategy_name=strategy_name,
+                **oos_params,
+            )
+            if "error" not in oos_run:
+                oos_result = {
+                    "total_return": oos_run["total_return"],
+                    "sharpe_ratio": oos_run["sharpe_ratio"],
+                    "max_drawdown": oos_run["max_drawdown"],
+                    "win_rate": oos_run["win_rate"],
+                    "total_trades": oos_run["total_trades"],
+                    "final_capital": oos_run["final_capital"],
+                    "trade_days": oos_trade_days,
+                }
+        except Exception as e:
+            logger.warning(f"OOS 回测异常: {e}")
+
+    degradation = None
+    overfit_warn = False
+    if best_result and oos_result:
+        is_ret = best_result["metrics"]["total_return"]
+        oos_ret = oos_result["total_return"]
+        degradation = round(is_ret - oos_ret, 2)
+        if oos_ret < 0 and is_ret > 0:
+            overfit_warn = True
+        elif is_ret > 0 and degradation > is_ret * 0.5:
+            overfit_warn = True
+
     return {
         "strategy": strategy_name,
         "metric": metric,
@@ -189,4 +242,9 @@ def optimize(close, high, low, open=None, volume=None,
         "best": best_result,
         "best_params": best_params,
         "top": top_n,
+        "oos": oos_result,
+        "oos_ratio": oos_ratio,
+        "is_trade_days": is_trade_days,
+        "degradation_pct": degradation,
+        "overfit_warning": overfit_warn,
     }

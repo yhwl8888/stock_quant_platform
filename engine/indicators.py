@@ -26,7 +26,6 @@ def MACD(close: np.ndarray, fast: int = 12, slow: int = 26, signal_period: int =
     ema_fast = EMA(close, fast)
     ema_slow = EMA(close, slow)
     dif = ema_fast - ema_slow
-    dea = EMA(dif[~np.isnan(dif)], signal_period) if np.sum(~np.isnan(dif)) > 0 else np.full_like(dif, np.nan)
     full_dea = np.full_like(dif, np.nan)
     valid = ~np.isnan(dif)
     if np.sum(valid) > signal_period:
@@ -45,12 +44,13 @@ def RSI(close: np.ndarray, period: int = 14) -> np.ndarray:
     losses = np.where(deltas < 0, -deltas, 0)
     avg_gain = np.mean(gains[:period])
     avg_loss = np.mean(losses[:period])
-    for i in range(period, len(deltas)):
-        avg_gain = (avg_gain * (period - 1) + gains[i]) / period
-        avg_loss = (avg_loss * (period - 1) + losses[i]) / period
+    rs = avg_gain / avg_loss if avg_loss != 0 else float('inf')
+    result[period] = 100 - (100 / (1 + rs))
+    for i in range(period + 1, len(close)):
+        avg_gain = (avg_gain * (period - 1) + gains[i - 1]) / period
+        avg_loss = (avg_loss * (period - 1) + losses[i - 1]) / period
         rs = avg_gain / avg_loss if avg_loss != 0 else float('inf')
         result[i] = 100 - (100 / (1 + rs))
-    result[period] = 100 - (100 / (1 + (avg_gain / avg_loss if avg_loss != 0 else float('inf'))))
     return result
 
 
