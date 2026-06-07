@@ -66,37 +66,25 @@ def _boll(arr, period=20, std_dev=2):
 
 
 def multi_factor_resonance(close, high, low, open_arr, i, position, **params):
-    """多因子共振策略：趋势+动量+成交量"""
+    """多因子共振策略：趋势+动量"""
     if i < 60 or position != 0:
         return 0
     
     ma_short = params.get("ma_short", 5)
     ma_mid = params.get("ma_mid", 20)
-    ma_long = params.get("ma_long", 60)
-    volume_ratio = params.get("volume_ratio", 1.5)
     
     close_slice = close[:i + 1]
-    volume_slice = params.get("volume", np.ones_like(close_slice))
     
     ma5 = _ma(close_slice, ma_short)
     ma20 = _ma(close_slice, ma_mid)
-    ma60 = _ma(close_slice, ma_long)
     
-    if np.isnan(ma5[i]) or np.isnan(ma20[i]) or np.isnan(ma60[i]):
+    if np.isnan(ma5[i]) or np.isnan(ma20[i]) or np.isnan(ma5[i - 1]) or np.isnan(ma20[i - 1]):
         return 0
     
-    trend_up = ma5[i] > ma20[i] and ma20[i] > ma60[i]
+    # 简单的均线金叉条件
     ma5_cross_ma20 = ma5[i - 1] <= ma20[i - 1] and ma5[i] > ma20[i]
     
-    if i >= 10:
-        avg_vol = np.mean(volume_slice[i - 10:i])
-        vol_confirm = volume_slice[i] > avg_vol * volume_ratio
-    else:
-        vol_confirm = False
-    
-    momentum = (close[i] - close[i - 5]) / close[i - 5] > 0.02
-    
-    if trend_up and ma5_cross_ma20 and vol_confirm and momentum:
+    if ma5_cross_ma20:
         return 1
     return 0
 
@@ -106,11 +94,12 @@ def multi_factor_resonance_exit(close, high, low, i, entry_price, position, entr
         return 0
     ma_short = params.get("ma_short", 5)
     ma_mid = params.get("ma_mid", 20)
-    hold_days = params.get("hold_days", 10)
+    hold_days = params.get("hold_days", 15)
     
     ma5 = _ma(close[:i + 1], ma_short)
     ma20 = _ma(close[:i + 1], ma_mid)
     
+    # 要么持有时间够长，要么死叉就卖出
     if i >= entry_bar + hold_days:
         return -1
     if not np.isnan(ma5[i]) and not np.isnan(ma20[i]) and ma5[i] < ma20[i]:
@@ -119,33 +108,22 @@ def multi_factor_resonance_exit(close, high, low, i, entry_price, position, entr
 
 
 def macd_rsi_volume(close, high, low, open_arr, i, position, **params):
-    """MACD金叉+RSI超卖+成交量放大"""
+    """MACD金叉策略"""
     if i < 30 or position != 0:
         return 0
     
     rsi_period = params.get("rsi_period", 14)
-    rsi_low = params.get("rsi_low", 30)
-    volume_ratio = params.get("volume_ratio", 1.3)
-    
     close_slice = close[:i + 1]
-    volume_slice = params.get("volume", np.ones_like(close_slice))
     
     dif, dea, hist = _macd(close_slice)
-    rsi = _rsi(close_slice, rsi_period)
     
-    if np.isnan(dif[i]) or np.isnan(dea[i]) or np.isnan(rsi[i]):
+    if np.isnan(dif[i]) or np.isnan(dea[i]) or np.isnan(dif[i - 1]) or np.isnan(dea[i - 1]):
         return 0
     
+    # 简化版：只看MACD金叉
     macd_cross = dif[i - 1] <= dea[i - 1] and dif[i] > dea[i]
-    rsi_oversold = rsi[i] < rsi_low
     
-    if i >= 10:
-        avg_vol = np.mean(volume_slice[i - 10:i])
-        vol_confirm = volume_slice[i] > avg_vol * volume_ratio
-    else:
-        vol_confirm = False
-    
-    if macd_cross and rsi_oversold and vol_confirm:
+    if macd_cross:
         return 1
     return 0
 
@@ -153,40 +131,37 @@ def macd_rsi_volume(close, high, low, open_arr, i, position, **params):
 def macd_rsi_volume_exit(close, high, low, i, entry_price, position, entry_bar, **params):
     if position <= 0:
         return 0
-    rsi_high = params.get("rsi_high", 70)
-    hold_days = params.get("hold_days", 8)
+    hold_days = params.get("hold_days", 15)
     
-    rsi = _rsi(close[:i + 1], params.get("rsi_period", 14))
+    dif, dea, _ = _macd(close[:i + 1])
     
+    # 要么持有时间够长，要么MACD死叉就卖出
     if i >= entry_bar + hold_days:
         return -1
-    if not np.isnan(rsi[i]) and rsi[i] > rsi_high:
+    if not np.isnan(dif[i]) and not np.isnan(dea[i]) and dif[i] < dea[i]:
         return -1
     return 0
 
 
 def boll_rsi_mean_reversion(close, high, low, open_arr, i, position, **params):
-    """布林带RSI均值回归策略：跌破下轨+RSI超卖买入"""
+    """布林带均值回归策略：跌破下轨买入"""
     if i < 30 or position != 0:
         return 0
     
     boll_period = params.get("boll_period", 20)
     boll_std = params.get("boll_std", 2.0)
-    rsi_period = params.get("rsi_period", 14)
-    rsi_low = params.get("rsi_low", 25)
     
     close_slice = close[:i + 1]
     upper, middle, lower = _boll(close_slice, boll_period, boll_std)
-    rsi = _rsi(close_slice, rsi_period)
     
-    if np.isnan(lower[i]) or np.isnan(rsi[i]):
+    if np.isnan(lower[i]) or np.isnan(lower[i - 1]):
         return 0
     
+    # 简化条件：跌破下轨
     touch_lower = close[i] <= lower[i]
-    rsi_oversold = rsi[i] < rsi_low
     prev_above_lower = close[i - 1] > lower[i - 1]
     
-    if touch_lower and rsi_oversold and prev_above_lower:
+    if touch_lower and prev_above_lower:
         return 1
     return 0
 
@@ -196,18 +171,14 @@ def boll_rsi_mean_reversion_exit(close, high, low, i, entry_price, position, ent
         return 0
     boll_period = params.get("boll_period", 20)
     boll_std = params.get("boll_std", 2.0)
-    rsi_high = params.get("rsi_high", 75)
-    hold_days = params.get("hold_days", 6)
+    hold_days = params.get("hold_days", 15)
     
     close_slice = close[:i + 1]
     upper, middle, _ = _boll(close_slice, boll_period, boll_std)
-    rsi = _rsi(close_slice, params.get("rsi_period", 14))
     
     if i >= entry_bar + hold_days:
         return -1
     if not np.isnan(upper[i]) and close[i] >= upper[i]:
-        return -1
-    if not np.isnan(rsi[i]) and rsi[i] > rsi_high:
         return -1
     return 0
 
@@ -219,10 +190,15 @@ def turtle_trading(close, high, low, open_arr, i, position, **params):
     
     entry_period = params.get("entry_period", 20)
     
-    high_slice = high[:i + 1]
-    entry_high = np.max(high_slice[i - entry_period + 1:i])
+    # 获取过去entry_period天的最高价（不包括当天）
+    start_idx = max(0, i - entry_period + 1)
+    high_slice = high[start_idx:i]
+    if len(high_slice) == 0:
+        return 0
+    entry_high = np.max(high_slice)
     
-    if close[i] > entry_high and high[i] > entry_high:
+    # 突破高点买入
+    if close[i] > entry_high:
         return 1
     return 0
 
@@ -232,42 +208,38 @@ def turtle_trading_exit(close, high, low, i, entry_price, position, entry_bar, *
         return 0
     exit_period = params.get("exit_period", 10)
     
-    low_slice = low[:i + 1]
-    exit_low = np.min(low_slice[i - exit_period + 1:i])
+    # 获取过去exit_period天的最低价
+    start_idx = max(0, i - exit_period + 1)
+    low_slice = low[start_idx:i]
+    if len(low_slice) == 0:
+        return 0
+    exit_low = np.min(low_slice)
     
-    if close[i] < exit_low and low[i] < exit_low:
+    # 跌破低点卖出
+    if close[i] < exit_low:
         return -1
     return 0
 
 
 def rsi_reversal_volume(close, high, low, open_arr, i, position, **params):
-    """RSI超卖反转+成交量确认策略"""
+    """RSI均值回归策略：RSI超卖买入"""
     if i < 20 or position != 0:
         return 0
     
     rsi_period = params.get("rsi_period", 14)
-    rsi_low = params.get("rsi_low", 20)
-    volume_ratio = params.get("volume_ratio", 1.8)
+    rsi_low = params.get("rsi_low", 30)
     
     close_slice = close[:i + 1]
-    volume_slice = params.get("volume", np.ones_like(close_slice))
     
     rsi = _rsi(close_slice, rsi_period)
     
     if np.isnan(rsi[i]) or np.isnan(rsi[i - 1]):
         return 0
     
+    # 简化条件：RSI从超卖区域回升
     rsi_enter = rsi[i - 1] < rsi_low and rsi[i] > rsi[i - 1]
     
-    if i >= 5:
-        avg_vol = np.mean(volume_slice[i - 5:i])
-        vol_spike = volume_slice[i] > avg_vol * volume_ratio
-    else:
-        vol_spike = False
-    
-    price_stop_falling = close[i] > close[i - 1]
-    
-    if rsi_enter and vol_spike and price_stop_falling:
+    if rsi_enter:
         return 1
     return 0
 
@@ -276,14 +248,11 @@ def rsi_reversal_volume_exit(close, high, low, i, entry_price, position, entry_b
     if position <= 0:
         return 0
     rsi_high = params.get("rsi_high", 70)
-    take_profit = params.get("take_profit_pct", 0.06)
-    hold_days = params.get("hold_days", 5)
+    hold_days = params.get("hold_days", 15)
     
     rsi = _rsi(close[:i + 1], params.get("rsi_period", 14))
     
     if i >= entry_bar + hold_days:
-        return -1
-    if (close[i] - entry_price) / entry_price >= take_profit:
         return -1
     if not np.isnan(rsi[i]) and rsi[i] > rsi_high:
         return -1
